@@ -1,0 +1,6 @@
+# Ignorar carpeta de configuración de VS Code
+.vscode/
+
+# Ignorar archivos de texto específicos
+paralelismo_teoria.txt
+pasos.txt

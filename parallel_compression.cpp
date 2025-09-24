@@ -1,8 +1,8 @@
 /* ------------------------------------------------------------
  * UNIVERSIDAD DEL VALLE DE GUATEMALA
- * FACULTAD DE INGENIERIA
+ * FACULTAD DE INGENIERIA  
  * DEPARTAMENTO DE CIENCIA DE LA COMPUTACION
- *
+ * AUTOIOR: DENIL JOSÈ PARADA CABRERA - 24761
  * Curso: CC3086 Programacion de Microprocesadores
  * Laboratorio 7: Compresion paralela de archivos
  * ------------------------------------------------------------
@@ -20,56 +20,60 @@
 using namespace std;
 using namespace chrono;
 
-// Estructura para pasar datos a los hilos
+// Estructura para metadata de bloques
+struct BlockInfo {
+    size_t originalSize;
+    size_t compressedSize;
+};
+
+// Estructura para pasar datos a los hilos de compresión
 struct ThreadData {
     int threadId;
     vector<char>* inputData;
     size_t startPos;
     size_t blockSize;
-    vector<char>* compressedData;
-    size_t* compressedSize;
+    vector<char> compressedData;
+    size_t compressedSize;
     bool compressionSuccess;
 };
 
+// Estructura para pasar datos a los hilos de descompresión
 struct DecompressThreadData {
     int threadId;
     vector<char>* compressedData;
     size_t startPos;
-    size_t blockSize;
-    vector<char>* decompressedData;
-    size_t* decompressedSize;
+    size_t compressedSize;
+    vector<char> decompressedData;
+    size_t originalSize;
     bool decompressionSuccess;
 };
 
 // Variables globales para sincronización
 pthread_mutex_t writeMutex = PTHREAD_MUTEX_INITIALIZER;
-pthread_mutex_t orderMutex = PTHREAD_MUTEX_INITIALIZER;
-vector<bool> blockCompleted;
-int nextBlockToWrite = 0;
 
 // Función para comprimir un bloque
 void* compressBlock(void* arg) {
     ThreadData* data = static_cast<ThreadData*>(arg);
     
-    // Calcular el tamaño real del bloque (puede ser menor en el último bloque)
+    // Calcular el tamaño real del bloque
     size_t actualBlockSize = min(data->blockSize, data->inputData->size() - data->startPos);
     
     // Calcular el tamaño máximo necesario para la compresión
     uLongf maxCompressedSize = compressBound(actualBlockSize);
-    data->compressedData->resize(maxCompressedSize);
+    data->compressedData.resize(maxCompressedSize);
     
     // Comprimir el bloque
     uLongf compressedSize = maxCompressedSize;
     int result = compress(
-        reinterpret_cast<Bytef*>(data->compressedData->data()),
+        reinterpret_cast<Bytef*>(data->compressedData.data()),
         &compressedSize,
         reinterpret_cast<const Bytef*>(data->inputData->data() + data->startPos),
         actualBlockSize
     );
     
     if (result == Z_OK) {
-        data->compressedData->resize(compressedSize);
-        *(data->compressedSize) = compressedSize;
+        data->compressedData.resize(compressedSize);
+        data->compressedSize = compressedSize;
         data->compressionSuccess = true;
         
         cout << "Hilo " << data->threadId << " comprimió bloque de " 
@@ -86,53 +90,27 @@ void* compressBlock(void* arg) {
 void* decompressBlock(void* arg) {
     DecompressThreadData* data = static_cast<DecompressThreadData*>(arg);
     
-    // Para la descompresión, necesitamos conocer el tamaño original
-    // En un caso real, esto se almacenaría en el archivo comprimido
-    uLongf decompressedSize = data->blockSize * 4; // Estimación
-    data->decompressedData->resize(decompressedSize);
+    // Redimensionar el buffer de salida al tamaño original conocido
+    data->decompressedData.resize(data->originalSize);
     
+    uLongf decompressedSize = data->originalSize;
     int result = uncompress(
-        reinterpret_cast<Bytef*>(data->decompressedData->data()),
+        reinterpret_cast<Bytef*>(data->decompressedData.data()),
         &decompressedSize,
         reinterpret_cast<const Bytef*>(data->compressedData->data() + data->startPos),
-        data->blockSize
+        data->compressedSize
     );
     
     if (result == Z_OK) {
-        data->decompressedData->resize(decompressedSize);
-        *(data->decompressedSize) = decompressedSize;
         data->decompressionSuccess = true;
-        
         cout << "Hilo " << data->threadId << " descomprimió bloque de " 
-             << data->blockSize << " bytes a " << decompressedSize << " bytes" << endl;
+             << data->compressedSize << " bytes a " << decompressedSize << " bytes" << endl;
     } else {
         data->decompressionSuccess = false;
-        cerr << "Error en descompresión del hilo " << data->threadId << endl;
+        cerr << "Error en descompresión del hilo " << data->threadId << " (código " << result << ")" << endl;
     }
     
     return nullptr;
-}
-
-// Función para escribir los bloques en orden
-void writeBlockInOrder(ofstream& output, vector<ThreadData>& threads, int blockId) {
-    pthread_mutex_lock(&orderMutex);
-    
-    // Esperar hasta que sea el turno de este bloque
-    while (nextBlockToWrite != blockId) {
-        pthread_mutex_unlock(&orderMutex);
-        usleep(1000); // Esperar 1ms
-        pthread_mutex_lock(&orderMutex);
-    }
-    
-    // Escribir el bloque
-    pthread_mutex_lock(&writeMutex);
-    output.write(threads[blockId].compressedData->data(), *threads[blockId].compressedSize);
-    pthread_mutex_unlock(&writeMutex);
-    
-    nextBlockToWrite++;
-    blockCompleted[blockId] = true;
-    
-    pthread_mutex_unlock(&orderMutex);
 }
 
 int compressFile(const string& inputFile, const string& outputFile, int numThreads) {
@@ -168,25 +146,10 @@ int compressFile(const string& inputFile, const string& outputFile, int numThrea
     
     cout << "Dividiendo en " << numBlocks << " bloques de ~" << (blockSize / 1024) << " KB cada uno" << endl;
     
-    // Ajustar número de hilos si hay menos bloques
-    numThreads = min(numThreads, numBlocks);
-    
-    // Inicializar vectores de control
-    blockCompleted.assign(numBlocks, false);
-    nextBlockToWrite = 0;
-    
-    // Crear estructuras de datos para hilos
+    // Crear estructuras de datos
     vector<ThreadData> threadData(numBlocks);
     vector<pthread_t> threads(numThreads);
-    vector<vector<char>> compressedBlocks(numBlocks);
-    vector<size_t> compressedSizes(numBlocks);
-    
-    // Abrir archivo de salida
-    ofstream output(outputFile, ios::binary);
-    if (!output) {
-        cerr << "Error: No se pudo abrir el archivo de salida." << endl;
-        return 1;
-    }
+    vector<BlockInfo> blockInfo(numBlocks);
     
     // Procesar bloques en lotes
     for (int startBlock = 0; startBlock < numBlocks; startBlock += numThreads) {
@@ -199,8 +162,6 @@ int compressFile(const string& inputFile, const string& outputFile, int numThrea
             threadData[blockId].inputData = &inputData;
             threadData[blockId].startPos = blockId * blockSize;
             threadData[blockId].blockSize = blockSize;
-            threadData[blockId].compressedData = &compressedBlocks[blockId];
-            threadData[blockId].compressedSize = &compressedSizes[blockId];
         }
         
         // Crear hilos
@@ -216,17 +177,39 @@ int compressFile(const string& inputFile, const string& outputFile, int numThrea
         for (int i = 0; i < blocksInThisBatch; i++) {
             pthread_join(threads[i], nullptr);
         }
-        
-        // Escribir bloques en orden
-        for (int i = 0; i < blocksInThisBatch; i++) {
-            int blockId = startBlock + i;
-            if (threadData[blockId].compressionSuccess) {
-                output.write(compressedBlocks[blockId].data(), compressedSizes[blockId]);
-            } else {
-                cerr << "Error en la compresión del bloque " << blockId << endl;
-                return 1;
-            }
+    }
+    
+    // Escribir archivo comprimido con metadata
+    ofstream output(outputFile, ios::binary);
+    if (!output) {
+        cerr << "Error: No se pudo abrir el archivo de salida." << endl;
+        return 1;
+    }
+    
+    // Escribir header: número de bloques
+    output.write(reinterpret_cast<const char*>(&numBlocks), sizeof(int));
+    
+    // Calcular metadata de bloques
+    size_t totalCompressed = 0;
+    for (int i = 0; i < numBlocks; i++) {
+        if (threadData[i].compressionSuccess) {
+            size_t actualOriginalSize = min(blockSize, fileSize - i * blockSize);
+            blockInfo[i].originalSize = actualOriginalSize;
+            blockInfo[i].compressedSize = threadData[i].compressedSize;
+            totalCompressed += threadData[i].compressedSize;
+        } else {
+            cerr << "Error en la compresión del bloque " << i << endl;
+            return 1;
         }
+    }
+    
+    // Escribir metadata de todos los bloques
+    output.write(reinterpret_cast<const char*>(blockInfo.data()), 
+                numBlocks * sizeof(BlockInfo));
+    
+    // Escribir datos comprimidos en orden
+    for (int i = 0; i < numBlocks; i++) {
+        output.write(threadData[i].compressedData.data(), threadData[i].compressedSize);
     }
     
     output.close();
@@ -234,16 +217,12 @@ int compressFile(const string& inputFile, const string& outputFile, int numThrea
     auto end = high_resolution_clock::now();
     auto duration = duration_cast<milliseconds>(end - start);
     
-    // Calcular tamaño total comprimido
-    size_t totalCompressed = 0;
-    for (size_t size : compressedSizes) {
-        totalCompressed += size;
-    }
-    
     cout << "\n=== RESULTADOS ===" << endl;
     cout << "Compresión completada exitosamente" << endl;
     cout << "Tamaño original: " << fileSize << " bytes" << endl;
     cout << "Tamaño comprimido: " << totalCompressed << " bytes" << endl;
+    cout << "Metadata: " << (sizeof(int) + numBlocks * sizeof(BlockInfo)) << " bytes" << endl;
+    cout << "Archivo total: " << (totalCompressed + sizeof(int) + numBlocks * sizeof(BlockInfo)) << " bytes" << endl;
     cout << "Ratio de compresión: " << (100.0 - (totalCompressed * 100.0 / fileSize)) << "%" << endl;
     cout << "Tiempo de ejecución: " << duration.count() << " ms" << endl;
     
@@ -252,62 +231,117 @@ int compressFile(const string& inputFile, const string& outputFile, int numThrea
 
 int decompressFile(const string& inputFile, const string& outputFile, int numThreads) {
     cout << "\n=== DESCOMPRESIÓN PARALELA ===" << endl;
-    cout << "Esta implementación básica descomprime secuencialmente" << endl;
-    cout << "Para descompresión paralela real, se necesita metadata adicional" << endl;
+    cout << "Archivo comprimido: " << inputFile << endl;
+    cout << "Archivo de salida: " << outputFile << endl;
+    cout << "Número de hilos: " << numThreads << endl;
     
     auto start = high_resolution_clock::now();
     
     // Leer archivo comprimido
-    ifstream input(inputFile, ios::binary | ios::ate);
+    ifstream input(inputFile, ios::binary);
     if (!input) {
         cerr << "Error: No se pudo abrir el archivo comprimido." << endl;
         return 1;
     }
     
-    size_t compressedSize = input.tellg();
-    input.seekg(0, ios::beg);
+    // Leer número de bloques
+    int numBlocks;
+    input.read(reinterpret_cast<char*>(&numBlocks), sizeof(int));
     
-    vector<char> compressedData(compressedSize);
-    if (!input.read(compressedData.data(), compressedSize)) {
-        cerr << "Error al leer el archivo comprimido." << endl;
-        return 1;
+    cout << "Número de bloques: " << numBlocks << endl;
+    
+    // Leer metadata de bloques
+    vector<BlockInfo> blockInfo(numBlocks);
+    input.read(reinterpret_cast<char*>(blockInfo.data()), 
+              numBlocks * sizeof(BlockInfo));
+    
+    // Calcular tamaño total de datos comprimidos
+    size_t totalCompressedSize = 0;
+    size_t totalOriginalSize = 0;
+    for (int i = 0; i < numBlocks; i++) {
+        totalCompressedSize += blockInfo[i].compressedSize;
+        totalOriginalSize += blockInfo[i].originalSize;
+        cout << "Bloque " << i << ": " << blockInfo[i].originalSize 
+             << " -> " << blockInfo[i].compressedSize << " bytes" << endl;
     }
+    
+    // Leer todos los datos comprimidos
+    vector<char> allCompressedData(totalCompressedSize);
+    input.read(allCompressedData.data(), totalCompressedSize);
     input.close();
     
-    // Estimar tamaño descomprimido (en caso real, esto se almacenaría en el archivo)
-    uLongf decompressedSize = compressedSize * 4;
-    vector<char> decompressedData(decompressedSize);
+    cout << "Datos comprimidos leídos: " << totalCompressedSize << " bytes" << endl;
+    cout << "Tamaño original esperado: " << totalOriginalSize << " bytes" << endl;
     
-    // Descomprimir
-    int result = uncompress(
-        reinterpret_cast<Bytef*>(decompressedData.data()),
-        &decompressedSize,
-        reinterpret_cast<const Bytef*>(compressedData.data()),
-        compressedSize
-    );
+    // Preparar estructuras para descompresión
+    vector<DecompressThreadData> threadData(numBlocks);
+    vector<pthread_t> threads(numThreads);
     
-    if (result != Z_OK) {
-        cerr << "Error en la descompresión (código " << result << ")" << endl;
-        return 1;
+    // Procesar bloques en lotes
+    size_t currentPos = 0;
+    for (int startBlock = 0; startBlock < numBlocks; startBlock += numThreads) {
+        int blocksInThisBatch = min(numThreads, numBlocks - startBlock);
+        
+        // Configurar datos para cada hilo
+        for (int i = 0; i < blocksInThisBatch; i++) {
+            int blockId = startBlock + i;
+            threadData[blockId].threadId = blockId;
+            threadData[blockId].compressedData = &allCompressedData;
+            threadData[blockId].startPos = currentPos;
+            threadData[blockId].compressedSize = blockInfo[blockId].compressedSize;
+            threadData[blockId].originalSize = blockInfo[blockId].originalSize;
+            
+            currentPos += blockInfo[blockId].compressedSize;
+        }
+        
+        // Crear hilos
+        for (int i = 0; i < blocksInThisBatch; i++) {
+            int blockId = startBlock + i;
+            if (pthread_create(&threads[i], nullptr, decompressBlock, &threadData[blockId]) != 0) {
+                cerr << "Error al crear hilo " << i << endl;
+                return 1;
+            }
+        }
+        
+        // Esperar a que terminen todos los hilos
+        for (int i = 0; i < blocksInThisBatch; i++) {
+            pthread_join(threads[i], nullptr);
+        }
+        
+        // Reiniciar posición para el siguiente lote
+        currentPos = 0;
+        for (int j = 0; j <= startBlock + blocksInThisBatch - 1; j++) {
+            currentPos += blockInfo[j].compressedSize;
+        }
     }
     
-    // Ajustar tamaño y guardar
-    decompressedData.resize(decompressedSize);
-    
+    // Escribir archivo descomprimido
     ofstream output(outputFile, ios::binary);
     if (!output) {
         cerr << "Error: No se pudo abrir el archivo de salida." << endl;
         return 1;
     }
     
-    output.write(decompressedData.data(), decompressedSize);
+    size_t totalWritten = 0;
+    for (int i = 0; i < numBlocks; i++) {
+        if (threadData[i].decompressionSuccess) {
+            output.write(threadData[i].decompressedData.data(), blockInfo[i].originalSize);
+            totalWritten += blockInfo[i].originalSize;
+        } else {
+            cerr << "Error en la descompresión del bloque " << i << endl;
+            return 1;
+        }
+    }
+    
     output.close();
     
     auto end = high_resolution_clock::now();
     auto duration = duration_cast<milliseconds>(end - start);
     
+    cout << "\n=== RESULTADOS ===" << endl;
     cout << "Descompresión completada exitosamente" << endl;
-    cout << "Tamaño descomprimido: " << decompressedSize << " bytes" << endl;
+    cout << "Archivo guardado como: " << outputFile << endl;
+    cout << "Tamaño descomprimido: " << totalWritten << " bytes" << endl;
     cout << "Tiempo de ejecución: " << duration.count() << " ms" << endl;
     
     return 0;
