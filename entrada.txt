@@ -1,0 +1,11 @@
+Universidad del Valle de Guatemala
+Facultad de Ingenieria
+Departamento de Ciencia de la Computacion
+
+Este es un archivo de ejemplo para probar la compresion secuencial
+utilizando la libreria zlib en C++.
+
+Los algoritmos de compresion permiten reducir el tamano
+de los archivos, aprovechando redundancias en los datos.
+
+Este archivo puede ser usado como entrada de prueba.
