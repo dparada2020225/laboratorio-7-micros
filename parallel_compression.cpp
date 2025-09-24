@@ -2,7 +2,7 @@
  * UNIVERSIDAD DEL VALLE DE GUATEMALA
  * FACULTAD DE INGENIERIA  
  * DEPARTAMENTO DE CIENCIA DE LA COMPUTACION
- * AUTOIOR: DENIL JOSÈ PARADA CABRERA - 24761
+ * AUTOR: DENIL JOSÈ PARADA CABRERA - 24761
  * Curso: CC3086 Programacion de Microprocesadores
  * Laboratorio 7: Compresion paralela de archivos
  * ------------------------------------------------------------
@@ -16,6 +16,9 @@
 #include <chrono>
 #include <cstring>
 #include <algorithm>
+#include <sys/stat.h>
+#include <unistd.h>
+#include <iomanip>
 
 using namespace std;
 using namespace chrono;
@@ -50,6 +53,34 @@ struct DecompressThreadData {
 
 // Variables globales para sincronización
 pthread_mutex_t writeMutex = PTHREAD_MUTEX_INITIALIZER;
+
+// Función para verificar si dos archivos son idénticos
+bool verifyFiles(const string& file1, const string& file2) {
+    ifstream f1(file1, ios::binary);
+    ifstream f2(file2, ios::binary);
+    
+    if (!f1 || !f2) {
+        cout << "Error: No se pudieron abrir los archivos para verificación." << endl;
+        return false;
+    }
+    
+    // Comparar tamaños primero
+    f1.seekg(0, ios::end);
+    f2.seekg(0, ios::end);
+    
+    if (f1.tellg() != f2.tellg()) {
+        cout << "Los archivos tienen tamaños diferentes." << endl;
+        return false;
+    }
+    
+    // Comparar contenido byte a byte
+    f1.seekg(0, ios::beg);
+    f2.seekg(0, ios::beg);
+    
+    return equal(istreambuf_iterator<char>(f1),
+                 istreambuf_iterator<char>(),
+                 istreambuf_iterator<char>(f2));
+}
 
 // Función para comprimir un bloque
 void* compressBlock(void* arg) {
@@ -223,7 +254,7 @@ int compressFile(const string& inputFile, const string& outputFile, int numThrea
     cout << "Tamaño comprimido: " << totalCompressed << " bytes" << endl;
     cout << "Metadata: " << (sizeof(int) + numBlocks * sizeof(BlockInfo)) << " bytes" << endl;
     cout << "Archivo total: " << (totalCompressed + sizeof(int) + numBlocks * sizeof(BlockInfo)) << " bytes" << endl;
-    cout << "Ratio de compresión: " << (100.0 - (totalCompressed * 100.0 / fileSize)) << "%" << endl;
+    cout << "Ratio de compresión: " << fixed << setprecision(2) << (100.0 - (totalCompressed * 100.0 / fileSize)) << "%" << endl;
     cout << "Tiempo de ejecución: " << duration.count() << " ms" << endl;
     
     return 0;
@@ -347,13 +378,97 @@ int decompressFile(const string& inputFile, const string& outputFile, int numThr
     return 0;
 }
 
+// Función para ejecutar benchmark con diferentes números de hilos
+void runBenchmark() {
+    cout << "\n=== BENCHMARK AUTOMÁTICO ===" << endl;
+    cout << "Probando compresión con diferentes números de hilos..." << endl;
+    
+    vector<int> threadCounts = {1, 2, 4, 8, 16, 32};
+    string inputFile = "paralelismo_teoria.txt";
+    
+    // Verificar que existe el archivo
+    ifstream test(inputFile);
+    if (!test.good()) {
+        cout << "Error: No se encontró el archivo " << inputFile << endl;
+        cout << "Asegúrate de que el archivo esté en el directorio actual." << endl;
+        return;
+    }
+    test.close();
+    
+    cout << "\n" << setw(8) << "Hilos" << setw(15) << "Tiempo(ms)" << setw(20) << "Speedup" << endl;
+    cout << "--------" << "---------------" << "--------------------" << endl;
+    
+    double baselineTime = 0;
+    
+    for (size_t i = 0; i < threadCounts.size(); i++) {
+        int threads = threadCounts[i];
+        string outputFile = "benchmark_" + to_string(threads) + "_hilos.bin";
+        
+        cout << "\nProbando con " << threads << " hilo(s)..." << endl;
+        
+        auto start = high_resolution_clock::now();
+        int result = compressFile(inputFile, outputFile, threads);
+        auto end = high_resolution_clock::now();
+        
+        if (result != 0) {
+            cout << "Error en la compresión con " << threads << " hilos" << endl;
+            continue;
+        }
+        
+        auto duration = duration_cast<milliseconds>(end - start);
+        double timeMs = duration.count();
+        
+        if (i == 0) {
+            baselineTime = timeMs;
+        }
+        
+        double speedup = (baselineTime > 0) ? baselineTime / timeMs : 1.0;
+        
+        cout << setw(8) << threads << setw(15) << fixed << setprecision(0) << timeMs 
+             << setw(20) << setprecision(2) << speedup << "x" << endl;
+        
+        // Limpiar archivo temporal
+        remove(outputFile.c_str());
+    }
+    
+    cout << "\n=== ANÁLISIS ===" << endl;
+    cout << "• Baseline (1 hilo): " << baselineTime << " ms" << endl;
+    cout << "• El speedup muestra cuántas veces más rápido es vs. 1 hilo" << endl;
+    cout << "• Valores > 1.0x indican mejora de rendimiento" << endl;
+    cout << "• Si el speedup decrece, indica saturación o overhead" << endl;
+}
+
+// Función para probar diferentes tamaños de bloque
+void testBlockSizes() {
+    cout << "\n=== PRUEBA DE TAMAÑOS DE BLOQUE ===" << endl;
+    cout << "Probando diferentes tamaños de bloque con 4 hilos..." << endl;
+    
+    string inputFile = "paralelismo_teoria.txt";
+    
+    // Verificar que existe el archivo
+    ifstream test(inputFile);
+    if (!test.good()) {
+        cout << "Error: No se encontró el archivo " << inputFile << endl;
+        return;
+    }
+    test.close();
+    
+    // Esta función requeriría modificar compressFile para aceptar blockSize como parámetro
+    cout << "Nota: Para implementar esta función completamente, se necesita modificar" << endl;
+    cout << "compressFile() para aceptar blockSize como parámetro." << endl;
+    cout << "Tamaño actual: 1 MB (1024*1024 bytes)" << endl;
+}
+
 void showMenu() {
     cout << "\n========================================" << endl;
     cout << "    COMPRESIÓN PARALELA DE ARCHIVOS" << endl;
     cout << "========================================" << endl;
     cout << "1. Comprimir archivo" << endl;
     cout << "2. Descomprimir archivo" << endl;
-    cout << "3. Salir" << endl;
+    cout << "3. Verificar integridad de archivos" << endl;
+    cout << "4. Ejecutar benchmark de rendimiento" << endl;
+    cout << "5. Probar tamaños de bloque" << endl;
+    cout << "6. Salir" << endl;
     cout << "========================================" << endl;
     cout << "Selecciona una opción: ";
 }
@@ -362,6 +477,9 @@ int main() {
     int option;
     string inputFile, outputFile;
     int numThreads;
+    
+    cout << "=== LABORATORIO 7: COMPRESIÓN PARALELA ===" << endl;
+    cout << "Autor: DENIL JOSÉ PARADA CABRERA - 24761" << endl;
     
     while (true) {
         showMenu();
@@ -395,16 +513,51 @@ int main() {
                 cout << "Número de hilos: ";
                 cin >> numThreads;
                 
+                if (numThreads <= 0) {
+                    cout << "Número de hilos debe ser positivo. Usando 1 hilo." << endl;
+                    numThreads = 1;
+                }
+                
                 decompressFile(inputFile, outputFile, numThreads);
                 break;
             }
             
-            case 3:
-                cout << "¡Hasta luego!" << endl;
+            case 3: {
+                cout << "\n--- VERIFICACIÓN DE INTEGRIDAD ---" << endl;
+                string file1, file2;
+                cout << "Archivo original: ";
+                cin >> file1;
+                cout << "Archivo descomprimido: ";
+                cin >> file2;
+                
+                cout << "Verificando integridad..." << endl;
+                if (verifyFiles(file1, file2)) {
+                    cout << "✓ Los archivos son IDÉNTICOS" << endl;
+                    cout << "La compresión/descompresión fue exitosa." << endl;
+                } else {
+                    cout << "✗ Los archivos son DIFERENTES" << endl;
+                    cout << "Hubo un problema en el proceso." << endl;
+                }
+                break;
+            }
+            
+            case 4: {
+                runBenchmark();
+                break;
+            }
+            
+            case 5: {
+                testBlockSizes();
+                break;
+            }
+            
+            case 6:
+                cout << "\n¡Gracias por usar el programa!" << endl;
+                cout << "Laboratorio completado exitosamente." << endl;
                 return 0;
                 
             default:
-                cout << "Opción inválida. Por favor, selecciona 1, 2 o 3." << endl;
+                cout << "Opción inválida. Por favor, selecciona 1-6." << endl;
                 break;
         }
         
